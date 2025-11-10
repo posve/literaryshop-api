@@ -2,10 +2,14 @@
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
 // Database connection
 const pool = new Pool({
@@ -32,6 +36,52 @@ app.use((req, res, next) => {
   console.log(`${req.method} ${req.path}`);
   next();
 });
+
+// ============================================================================
+// RATE LIMITING & MIDDLEWARE
+// ============================================================================
+
+// Rate limiting for login endpoint (5 attempts per 15 minutes)
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // 5 attempts per window
+  message: 'Too many login attempts, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Rate limiting for general API (100 requests per 15 minutes)
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  skip: (req) => req.method === 'GET', // Skip rate limiting for GET requests
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// JWT authentication middleware
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+
+  if (!token) {
+    return res.status(401).json({
+      success: false,
+      message: 'Access token required'
+    });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({
+        success: false,
+        message: 'Invalid or expired token'
+      });
+    }
+    req.user = user;
+    next();
+  });
+};
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -249,44 +299,71 @@ app.get('/api/orders', async (req, res) => {
 // ADMIN ROUTES
 // ============================================================================
 
-// Admin login
-app.post('/api/admin/login', async (req, res) => {
+// Admin login - with rate limiting and JWT
+app.post('/api/admin/login', loginLimiter, async (req, res) => {
   try {
     const { username, password } = req.body;
-    
+
     if (!username || !password) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        message: 'Username and password required' 
+        message: 'Username and password required'
       });
     }
-    
-    const ADMIN_USER = process.env.ADMIN_USERNAME || 'admin';
-    const ADMIN_PASS = process.env.ADMIN_PASSWORD || 'admin123';
-    
-    if (username === ADMIN_USER && password === ADMIN_PASS) {
-      res.json({ 
-        success: true, 
-        message: 'Login successful'
-      });
-    } else {
+
+    // Fetch admin user from database
+    const result = await pool.query(
+      'SELECT id, username, password_hash FROM admin_users WHERE username = $1',
+      [username]
+    );
+
+    if (result.rows.length === 0) {
+      // Delay response to prevent username enumeration
       await new Promise(resolve => setTimeout(resolve, 1000));
-      res.status(401).json({ 
-        success: false, 
-        message: 'Invalid credentials' 
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid credentials'
       });
     }
+
+    const user = result.rows[0];
+
+    // Compare provided password with hashed password
+    const passwordMatch = await bcrypt.compare(password, user.password_hash);
+
+    if (!passwordMatch) {
+      // Delay response to prevent timing attacks
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid credentials'
+      });
+    }
+
+    // Generate JWT token (expires in 7 days)
+    const token = jwt.sign(
+      { id: user.id, username: user.username },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      success: true,
+      message: 'Login successful',
+      token,
+      expiresIn: '7d'
+    });
   } catch (err) {
     console.error('Login error:', err);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      message: 'Login failed' 
+      message: 'Login failed'
     });
   }
 });
 
-// Add book
-app.post('/api/books', async (req, res) => {
+// Add book (protected route)
+app.post('/api/books', authenticateToken, apiLimiter, async (req, res) => {
   try {
     const { isbn, title, author, description, price, stock, image_url, category } = req.body;
     
@@ -336,8 +413,8 @@ app.post('/api/books', async (req, res) => {
   }
 });
 
-// Update book
-app.put('/api/books/:isbn', async (req, res) => {
+// Update book (protected route)
+app.put('/api/books/:isbn', authenticateToken, apiLimiter, async (req, res) => {
   try {
     const { isbn } = req.params;
     const { title, author, description, price, stock, image_url, category } = req.body;
@@ -383,8 +460,8 @@ app.put('/api/books/:isbn', async (req, res) => {
   }
 });
 
-// Delete book
-app.delete('/api/books/:isbn', async (req, res) => {
+// Delete book (protected route)
+app.delete('/api/books/:isbn', authenticateToken, apiLimiter, async (req, res) => {
   try {
     const { isbn } = req.params;
     
@@ -404,8 +481,8 @@ app.delete('/api/books/:isbn', async (req, res) => {
   }
 });
 
-// Update order status
-app.patch('/api/orders/:orderId/status', async (req, res) => {
+// Update order status (protected route)
+app.patch('/api/orders/:orderId/status', authenticateToken, apiLimiter, async (req, res) => {
   try {
     const { orderId } = req.params;
     const { status } = req.body;
