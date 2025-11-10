@@ -27,6 +27,9 @@ pool.connect((err, client, release) => {
   }
 });
 
+// Trust proxy - needed for rate limiting to work correctly on Render/Vercel
+app.set('trust proxy', 1);
+
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -48,6 +51,7 @@ const loginLimiter = rateLimit({
   message: 'Too many login attempts, please try again later',
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => process.env.NODE_ENV !== 'production', // Skip rate limiting in development
 });
 
 // Rate limiting for general API (100 requests per 15 minutes)
