@@ -5,6 +5,8 @@ const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
+const multer = require('multer');
+const { uploadImage, extractKeyFromUrl } = require('./scaleway-storage');
 require('dotenv').config();
 
 const app = express();
@@ -38,6 +40,22 @@ app.use(express.json({ limit: '10mb' }));
 app.use((req, res, next) => {
   console.log(`${req.method} ${req.path}`);
   next();
+});
+
+// Multer configuration for image uploads (stores in memory)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB max
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedMimes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+    if (allowedMimes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only JPEG, PNG, WebP, and GIF allowed'));
+    }
+  }
 });
 
 // ============================================================================
@@ -490,25 +508,161 @@ app.patch('/api/orders/:orderId/status', authenticateToken, apiLimiter, async (r
   try {
     const { orderId } = req.params;
     const { status } = req.body;
-    
+
     const validStatuses = ['pending', 'processing', 'sent', 'completed'];
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ error: 'Invalid status' });
     }
-    
+
     const result = await pool.query(
       'UPDATE orders SET status = $1 WHERE order_id = $2 RETURNING *',
       [status, orderId]
     );
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Order not found' });
     }
-    
+
     res.json(result.rows[0]);
   } catch (err) {
     console.error('Error updating order:', err);
     res.status(500).json({ error: 'Failed to update order' });
+  }
+});
+
+// Upload book image (protected route)
+app.post('/api/books/:isbn/images', authenticateToken, apiLimiter, upload.single('image'), async (req, res) => {
+  try {
+    const { isbn } = req.params;
+    const { altText, isPrimary } = req.body;
+
+    // Validate ISBN
+    if (!isValidISBN(isbn)) {
+      return res.status(400).json({ error: 'Invalid ISBN format' });
+    }
+
+    // Check if file was uploaded
+    if (!req.file) {
+      return res.status(400).json({ error: 'No image file provided' });
+    }
+
+    // Check if book exists
+    const bookCheck = await pool.query(
+      'SELECT isbn FROM books WHERE isbn = $1',
+      [isbn]
+    );
+
+    if (bookCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Book not found' });
+    }
+
+    // Generate unique file name
+    const timestamp = Date.now();
+    const fileName = `book-images/${isbn}-${timestamp}-${req.file.originalname}`;
+
+    // Upload to Scaleway
+    const imageUrl = await uploadImage(
+      req.file.buffer,
+      fileName,
+      req.file.mimetype
+    );
+
+    // Get current sort order for this ISBN
+    const sortOrderResult = await pool.query(
+      'SELECT MAX(sort_order) as max_order FROM book_images WHERE isbn = $1',
+      [isbn]
+    );
+    const nextSortOrder = (sortOrderResult.rows[0]?.max_order || -1) + 1;
+
+    // Insert image record into database
+    const result = await pool.query(
+      `INSERT INTO book_images (isbn, scaleway_url, alt_text, sort_order, is_primary)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [
+        isbn,
+        imageUrl,
+        sanitizeInput(altText || ''),
+        nextSortOrder,
+        isPrimary === 'true' || isPrimary === true
+      ]
+    );
+
+    res.status(201).json({
+      success: true,
+      image: result.rows[0],
+      message: 'Image uploaded successfully'
+    });
+
+  } catch (err) {
+    console.error('Error uploading image:', err);
+    res.status(500).json({ error: 'Failed to upload image' });
+  }
+});
+
+// Get book images (public route)
+app.get('/api/books/:isbn/images', async (req, res) => {
+  try {
+    const { isbn } = req.params;
+
+    if (!isValidISBN(isbn)) {
+      return res.status(400).json({ error: 'Invalid ISBN format' });
+    }
+
+    const result = await pool.query(
+      'SELECT * FROM book_images WHERE isbn = $1 ORDER BY sort_order ASC',
+      [isbn]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error fetching images:', err);
+    res.status(500).json({ error: 'Failed to fetch images' });
+  }
+});
+
+// Delete book image (protected route)
+app.delete('/api/books/:isbn/images/:imageId', authenticateToken, apiLimiter, async (req, res) => {
+  try {
+    const { isbn, imageId } = req.params;
+
+    if (!isValidISBN(isbn)) {
+      return res.status(400).json({ error: 'Invalid ISBN format' });
+    }
+
+    // Get image record to find Scaleway URL
+    const imageResult = await pool.query(
+      'SELECT scaleway_url FROM book_images WHERE id = $1 AND isbn = $2',
+      [imageId, isbn]
+    );
+
+    if (imageResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+
+    const imageUrl = imageResult.rows[0].scaleway_url;
+
+    // Delete from database
+    await pool.query(
+      'DELETE FROM book_images WHERE id = $1',
+      [imageId]
+    );
+
+    // Delete from Scaleway (optional - if it fails, don't fail the whole request)
+    try {
+      const fileKey = extractKeyFromUrl(imageUrl);
+      const { deleteImage } = require('./scaleway-storage');
+      await deleteImage(fileKey);
+    } catch (err) {
+      console.warn('Warning: Could not delete image from Scaleway:', err.message);
+    }
+
+    res.json({
+      success: true,
+      message: 'Image deleted successfully'
+    });
+  } catch (err) {
+    console.error('Error deleting image:', err);
+    res.status(500).json({ error: 'Failed to delete image' });
   }
 });
 
