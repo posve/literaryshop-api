@@ -105,6 +105,40 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// CSRF Token validation middleware
+const validateCsrfToken = (req, res, next) => {
+  const csrfToken = req.headers['x-csrf-token'];
+
+  if (!csrfToken) {
+    return res.status(403).json({
+      success: false,
+      message: 'CSRF token required'
+    });
+  }
+
+  try {
+    const decoded = jwt.verify(csrfToken, JWT_SECRET);
+    // Check if token is not too old (additional security check)
+    const tokenAge = Date.now() - decoded.timestamp;
+    const maxAge = 60 * 60 * 1000; // 1 hour
+
+    if (tokenAge > maxAge) {
+      return res.status(403).json({
+        success: false,
+        message: 'CSRF token expired'
+      });
+    }
+
+    req.csrfValid = true;
+    next();
+  } catch (err) {
+    return res.status(403).json({
+      success: false,
+      message: 'Invalid CSRF token'
+    });
+  }
+};
+
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
@@ -168,8 +202,8 @@ app.get('/api/books/:isbn', async (req, res) => {
   }
 });
 
-// Create order
-app.post('/api/orders', async (req, res) => {
+// Create order (with CSRF protection)
+app.post('/api/orders', validateCsrfToken, async (req, res) => {
   const client = await pool.connect();
   
   try {
@@ -676,6 +710,56 @@ app.delete('/api/books/:isbn/images/:imageId', authenticateToken, apiLimiter, as
   } catch (err) {
     console.error('Error deleting image:', err);
     res.status(500).json({ error: 'Failed to delete image' });
+  }
+});
+
+// ============================================================================
+// SECURITY ENDPOINTS
+// ============================================================================
+
+// CSRF Token Endpoint - Generate and return a CSRF token
+app.get('/api/csrf-token', (req, res) => {
+  try {
+    const crypto = require('crypto');
+    // Generate a secure random CSRF token
+    const token = crypto.randomBytes(32).toString('hex');
+
+    // Store token in session (in production, use Redis or session middleware)
+    // For now, we'll sign it with JWT and validate it on the order endpoint
+    const signedToken = jwt.sign(
+      { token, timestamp: Date.now() },
+      JWT_SECRET,
+      { expiresIn: '1h' } // CSRF token expires in 1 hour
+    );
+
+    res.json({
+      success: true,
+      token: signedToken
+    });
+  } catch (err) {
+    console.error('Error generating CSRF token:', err);
+    res.status(500).json({ error: 'Failed to generate CSRF token' });
+  }
+});
+
+// Payment Info Endpoint - Return securely stored payment information
+app.get('/api/payment-info', (req, res) => {
+  try {
+    // In production, retrieve this from environment variables or secure vault
+    const paymentInfo = {
+      bank: process.env.PAYMENT_BANK || 'National Trust Bank',
+      accountName: process.env.PAYMENT_ACCOUNT_NAME || 'Ciengarnia Ltd.',
+      accountNumber: process.env.PAYMENT_ACCOUNT_NUMBER || '1234-5678-9012-3456',
+      swiftCode: process.env.PAYMENT_SWIFT_CODE || 'NTBKUS33'
+    };
+
+    res.json({
+      success: true,
+      ...paymentInfo
+    });
+  } catch (err) {
+    console.error('Error fetching payment info:', err);
+    res.status(500).json({ error: 'Failed to fetch payment information' });
   }
 });
 
