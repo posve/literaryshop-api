@@ -1,18 +1,29 @@
 // scaleway-storage.js - Scaleway S3 Object Storage Integration
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 
-// Configure AWS SDK v3 to work with Scaleway S3
-const s3Client = new S3Client({
-  region: process.env.SCALEWAY_REGION, // 'fr-par'
-  endpoint: process.env.SCALEWAY_ENDPOINT, // https://s3.fr-par.scw.cloud or similar
-  credentials: {
-    accessKeyId: process.env.SCALEWAY_ACCESS_KEY,
-    secretAccessKey: process.env.SCALEWAY_SECRET_KEY,
-  },
-  forcePathStyle: true, // Required for Scaleway
-});
+// Helper function to get S3 client (lazy initialization)
+const getS3Client = () => {
+  if (!process.env.SCALEWAY_ACCESS_KEY || !process.env.SCALEWAY_SECRET_KEY || !process.env.SCALEWAY_REGION) {
+    throw new Error('Missing Scaleway credentials in environment variables');
+  }
 
-const BUCKET_NAME = process.env.SCALEWAY_BUCKET;
+  return new S3Client({
+    region: process.env.SCALEWAY_REGION,
+    endpoint: process.env.SCALEWAY_ENDPOINT,
+    credentials: {
+      accessKeyId: process.env.SCALEWAY_ACCESS_KEY,
+      secretAccessKey: process.env.SCALEWAY_SECRET_KEY,
+    },
+    forcePathStyle: true,
+  });
+};
+
+const getBucketName = () => {
+  if (!process.env.SCALEWAY_BUCKET) {
+    throw new Error('Missing SCALEWAY_BUCKET in environment variables');
+  }
+  return process.env.SCALEWAY_BUCKET;
+};
 
 /**
  * Upload file to Scaleway Object Storage
@@ -23,16 +34,19 @@ const BUCKET_NAME = process.env.SCALEWAY_BUCKET;
  */
 const uploadImage = async (fileBuffer, fileName, mimeType) => {
   try {
+    const s3Client = getS3Client();
+    const bucketName = getBucketName();
+
     const command = new PutObjectCommand({
-      Bucket: BUCKET_NAME,
+      Bucket: bucketName,
       Key: fileName,
       Body: fileBuffer,
       ContentType: mimeType,
-      ACL: 'public-read' // Make files publicly readable
+      ACL: 'public-read'
     });
 
     const result = await s3Client.send(command);
-    const fileUrl = `${process.env.SCALEWAY_ENDPOINT}/${BUCKET_NAME}/${fileName}`;
+    const fileUrl = `${process.env.SCALEWAY_ENDPOINT}/${bucketName}/${fileName}`;
     console.log(`✅ Image uploaded: ${fileUrl}`);
     return fileUrl;
   } catch (err) {
@@ -48,8 +62,11 @@ const uploadImage = async (fileBuffer, fileName, mimeType) => {
  */
 const deleteImage = async (fileKey) => {
   try {
+    const s3Client = getS3Client();
+    const bucketName = getBucketName();
+
     const command = new DeleteObjectCommand({
-      Bucket: BUCKET_NAME,
+      Bucket: bucketName,
       Key: fileKey
     });
 
@@ -73,7 +90,6 @@ const extractKeyFromUrl = (url) => {
 };
 
 module.exports = {
-  s3Client,
   uploadImage,
   deleteImage,
   extractKeyFromUrl

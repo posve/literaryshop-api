@@ -574,6 +574,15 @@ app.post('/api/books/:isbn/images', authenticateToken, apiLimiter, upload.single
     );
     const nextSortOrder = (sortOrderResult.rows[0]?.max_order || -1) + 1;
 
+    // If setting as primary, unset all other primary images for this book
+    const isPrimaryFlag = isPrimary === 'true' || isPrimary === true;
+    if (isPrimaryFlag) {
+      await pool.query(
+        'UPDATE book_images SET is_primary = false WHERE isbn = $1',
+        [isbn]
+      );
+    }
+
     // Insert image record into database
     const result = await pool.query(
       `INSERT INTO book_images (isbn, scaleway_url, alt_text, sort_order, is_primary)
@@ -583,7 +592,7 @@ app.post('/api/books/:isbn/images', authenticateToken, apiLimiter, upload.single
         imageUrl,
         sanitizeInput(altText || ''),
         nextSortOrder,
-        isPrimary === 'true' || isPrimary === true
+        isPrimaryFlag
       ]
     );
 
@@ -595,7 +604,11 @@ app.post('/api/books/:isbn/images', authenticateToken, apiLimiter, upload.single
 
   } catch (err) {
     console.error('Error uploading image:', err);
-    res.status(500).json({ error: 'Failed to upload image' });
+    res.status(500).json({
+      error: 'Failed to upload image',
+      details: err.message,
+      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    });
   }
 });
 
